@@ -1,4 +1,4 @@
-# 👆 DirectIR: Training-Free Enhancement for Diffusion-Based Image Restoration via Contrastive Guidance
+# 👆 TraceIR: Training-Free Contrastive Loss for Text-Guided Diffusion Image Restoration
 ***Computer Vision 2024 Final Project***
 
 [Youtube DEMO LINK]()

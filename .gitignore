@@ -1,0 +1,4 @@
+checkpoints/
+src/clip
+src/taming-transformers
+validation_results/

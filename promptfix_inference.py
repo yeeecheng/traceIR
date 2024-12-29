@@ -2,6 +2,7 @@ import os
 import random
 import sys
 from argparse import ArgumentParser
+
 import einops
 import k_diffusion as K
 import numpy as np
@@ -15,22 +16,18 @@ from k_diffusion import utils
 from k_diffusion.sampling import default_noise_sampler, to_d, get_ancestral_step
 from tqdm.auto import trange
 import torch.nn.functional as F
-from torchvision import transforms
-from torchvision.transforms import functional as TF
-import clip
-import open_clip
 
 sys.path.append("./stable_diffusion")
 
 from stable_diffusion.ldm.util import instantiate_from_config
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+from stable_diffusion.ldm.hfp import extract_high_freq_component, sobel_operator
+
 import json
 
 def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None):
     extra_args = extra_args or {}
     noise_sampler = noise_sampler or default_noise_sampler(x)
     s_in = x.new_ones([x.shape[0]])
-    
     for i in trange(len(sigmas) - 1, disable=disable):
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
@@ -53,22 +50,51 @@ def resize_image_to_resolution(input_image, resolution, reverse=True):
     return ImageOps.fit(input_image, (new_width, new_height), method=Image.Resampling.LANCZOS)
 
 class CFGDenoiser(nn.Module):
-    def __init__(self, model, contrastive_loss):
+    def __init__(self, model):
         super().__init__()
         self.inner_model = model
-        # self.clip_model, self.clip_preprocess = clip.load('ViT-L/14', jit=False)
-        # self.clip_model = self.clip_model.eval().requires_grad_(False).to('cuda:1')
-        
-        self.clip_model, self.clip_preprocess = open_clip.create_model_from_pretrained('daclip_ViT-B-32', pretrained= "./checkpoints/daclip_ViT-B-32.pt", jit= False)
-        self.clip_model = self.clip_model.eval().requires_grad_(False).to('cuda:1')
-        self.contrastive_loss = contrastive_loss
 
-    def forward(self, z, sigma, cond, uncond, text_cfg_scale, image_cfg_scale, input_image=None):
+    def _get_hfp_loss(self, x_pred, x_original, t, lambdas=[0.001]):
+        fft_pred, sobel_pred = self._get_hf_map(x_pred)
+        fft_original, sobel_original = self._get_hf_map(x_original.to(x_pred.device))
+        loss = (F.mse_loss(fft_pred, fft_original, reduction='none') + F.mse_loss(sobel_pred, sobel_original, reduction='none')) / 2
+        loss = torch.mean(torch.flatten(loss, 1), dim=1) * torch.exp(-lambdas[0] * t)
+        return torch.mean(loss)
+
+    def _get_hf_map(self, rgb):
+        rgb = (rgb + 1) / 2
+        rgb = rgb.to(torch.float32)
+        assert rgb.dim() == 4, "Input must be 4D tensor"
+        return extract_high_freq_component(rgb, cutoff=30), sobel_operator(rgb)
+    
+    def _pred_xstart_from_eps(self, x_t, t, epilson):
+        sqrt_one_minus_at = self.inner_model.inner_model.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1).to(x_t.device)
+        a_t = self.inner_model.inner_model.alphas_cumprod[t].view(-1, 1, 1, 1).to(x_t.device)
+        return (x_t - sqrt_one_minus_at * epilson) / a_t.sqrt()
+
+    def _get_eps(self, input, sigma, **kwargs):
+        c_out, c_in = [utils.append_dims(x, input.ndim) for x in self.inner_model.get_scalings(sigma)]
+        return self.inner_model.get_eps(input * c_in, self.inner_model.sigma_to_t(sigma), **kwargs)
+
+    def hf_guidance(self, z, sigma, cond, x_original):
+        t = self.inner_model.sigma_to_t(sigma).long()
+        z = z.requires_grad_(True)
+        eps = self._get_eps(z, sigma, cond=cond)
+        pred_x0 = self._pred_xstart_from_eps(x_t=z / sigma, t=t, epilson=eps)
+        x_pred = torch.clamp(self.inner_model.inner_model.differentiable_decode_first_stage(pred_x0), min=-1.0, max=1.0)
+        loss_hfp = self._get_hfp_loss(x_pred, x_original, t)
+    
+        torch.autograd.set_detect_anomaly(True)
+        with torch.autograd.detect_anomaly():
+            grad_cond = torch.autograd.grad(loss_hfp.requires_grad_(True), [z])[0]
+        z = z - grad_cond
+        torch.cuda.empty_cache()
+        return z
         
-        if self.contrastive_loss:
-            z = self.clip_loss(z, sigma, cond, input_image)
-            z = z.detach()
-            
+    def forward(self, z, sigma, cond, uncond, text_cfg_scale, image_cfg_scale, input_image=None):
+        if input_image is not None:
+            for _ in range(5):
+                z = self.hf_guidance(z, sigma, cond, x_original=input_image)
         cfg_z = einops.repeat(z, "b ... -> (repeat b) ...", repeat=3)
         cfg_sigma = einops.repeat(sigma, "b ... -> (repeat b) ...", repeat=3)
         cfg_cond = {
@@ -76,71 +102,8 @@ class CFGDenoiser(nn.Module):
             "c_concat": [torch.cat([cond["c_concat"][0], cond["c_concat"][0], uncond["c_concat"][0]])],
         }
         out_cond, out_img_cond, out_txt_cond = self.inner_model(cfg_z, cfg_sigma, cond=cfg_cond).chunk(3)
-        return 0.5 * (out_img_cond + out_txt_cond) + text_cfg_scale * (out_cond - out_img_cond) +\
-              image_cfg_scale * (out_cond - out_txt_cond)
+        return 0.5 * (out_img_cond + out_txt_cond) + text_cfg_scale * (out_cond - out_img_cond) + image_cfg_scale * (out_cond - out_txt_cond)
 
-    def global_loss(self, input_img, target_prompt):
-        text_target_tokens = clip.tokenize(target_prompt).to('cuda:1')
-        similarity = 1 - self.clip_model.cosine_similarity(input_img, text_target_tokens)[0] / 100
-        # similarity = 1 - self.clip_model(input_img, text_target_tokens)[0] / 100
-        return similarity.mean()
-
-    def directional_loss(self, input_img, timesteps_img, source_prompt, target_prompt):
-        
-        encoded_image_diff = input_img - timesteps_img
-        encoded_text_diff = source_prompt - target_prompt
-        cosine_similarity = F.cosine_similarity(encoded_image_diff, encoded_text_diff, dim= -1)
-
-        return (1 - cosine_similarity).mean()
-    
-    def clip_loss(self, z, sigma, cond, input_img):
-        t = self.inner_model.sigma_to_t(sigma).long()
-        alpha = 1
-
-        if t < 400:
-            return z
-    
-        with torch.set_grad_enabled(True):
-            z = z.requires_grad_(True)
-
-            # 1. Transform latent (z) to image
-            x_pred = self.inner_model.inner_model.differentiable_decode_first_stage(z).requires_grad_(True)
-            # save image
-            x_pred = 255 * torch.clamp((x_pred + 1.0) / 2.0, min=0.0, max=1.0)
-            # x_pred = 255.0 * rearrange(x_pred, "1 c h w -> h w c")
-            # original_image = Image.fromarray(pixel_img.type(torch.uint8).cpu().numpy())
-            # original_image.save(os.path.join("./timestep", f"{t}.jpg"))
-            
-            # 2. Encode image with CLIP image encoder
-            resize = transforms.Resize((224, 224))
-            x_pred = resize(x_pred).to("cuda:1")
-            
-            image_embedding = self.clip_model.encode_image(x_pred, control= False).float().requires_grad_(True)
-            image_embedding = torch.cat([image_embedding, torch.zeros(1, 256).to("cuda:1")], dim=1).to("cuda:1")
-            
-            input_img = resize(input_img).to("cuda:1")
-            input_img_embedding = self.clip_model.encode_image(input_img).float().requires_grad_(True)
-            input_img_embedding = torch.cat([input_img_embedding, torch.zeros(1, 256).to("cuda:1")], dim=1).to("cuda:1")
-            target_text_embedding = cond["c_crossattn"][0][0].to("cuda:1")
-            source_text_embedding = cond["c_crossattn"][0][1].to("cuda:1")
-            
-            g_loss = self.global_loss(x_pred, cond["inst_prompt"])
-            dir_loss = self.directional_loss(
-                input_img_embedding, 
-                image_embedding, 
-                source_text_embedding, 
-                target_text_embedding)
-
-            loss = g_loss * 300 + dir_loss * 300
-            gradient = torch.autograd.grad(loss.to("cuda:0"), [z])[0]
-       
-        z = z - alpha * gradient * 50
-        z = z.detach()
-        torch.cuda.empty_cache()
-        del gradient, loss, target_text_embedding, source_text_embedding, image_embedding, input_img_embedding
-        return z
-    
-        
 def load_model_from_config(config, ckpt, vae_ckpt=None, verbose=False):
     model = instantiate_from_config(config.model)
     pl_sd = torch.load(ckpt, map_location="cpu")
@@ -153,7 +116,7 @@ def load_model_from_config(config, ckpt, vae_ckpt=None, verbose=False):
 def main():
     parser = ArgumentParser()
     parser.add_argument("--resolution", default=320, type=int)
-    parser.add_argument("--steps", default=100, type=int)
+    parser.add_argument("--steps", default=20, type=int)
     parser.add_argument("--config", default="configs/promptfix.yaml", type=str)
     parser.add_argument("--ckpt", default="./checkpoints/promptfix.ckpt", type=str)
     parser.add_argument("--vae-ckpt", default=None, type=str)
@@ -164,17 +127,15 @@ def main():
     parser.add_argument("--seed", default=2024, type=int)
     parser.add_argument("--disable_hf_guidance", type=bool, default=True)
     parser.add_argument("--enable-flaw-prompt", type=bool, default=True)
-    parser.add_argument("--contrastive-loss", default= True, type=bool)
     args = parser.parse_args()
 
     config = OmegaConf.load(args.config)
     os.makedirs(args.outdir, exist_ok=True)
-
-    model = load_model_from_config(config, args.ckpt, args.vae_ckpt).to("cuda:0")
-    model.eval().to('cuda:0')
+    model = load_model_from_config(config, args.ckpt, args.vae_ckpt)
+    model.eval().cuda()
 
     model_wrap = K.external.CompVisDenoiser(model)
-    model_wrap_cfg = CFGDenoiser(model_wrap, args.contrastive_loss)
+    model_wrap_cfg = CFGDenoiser(model_wrap)
     null_token = model.get_learned_conditioning([""])
 
     seed = args.seed if args.seed is not None else random.randint(0, 100000)
@@ -186,21 +147,15 @@ def main():
         
         input_image = Image.open(os.path.join(args.indir, image_path)).convert("RGB")
         input_image = resize_image_to_resolution(input_image, args.resolution, 'inpaint' not in image_path)
+        print(np.array(input_image).shape)
         input_image_pil = input_image
         
-        with autocast("cuda:0"):
+        with autocast("cuda"):
             cond = {}
             inst_prompt, flaw_prompt = instruct_dic[image_path]
-            
-            cond["inst_prompt"] = inst_prompt
-            cond["flaw_prompt"] = flaw_prompt
-            
-            # instruction prompt and flaw prompt embedding 
             cond["c_crossattn"] = [model.get_learned_conditioning([inst_prompt, flaw_prompt] if args.enable_flaw_prompt else [inst_prompt])]
-        
             input_image = 2 * torch.tensor(np.array(input_image)).float() / 255 - 1
             input_image = rearrange(input_image, "h w c -> 1 c h w").to(next(model.parameters()).device)
-            # input image embedding 
             cond["c_concat"] = [model.encode_first_stage(input_image).mode()]
 
             uncond = {
@@ -215,20 +170,24 @@ def main():
                 "uncond": uncond,
                 "text_cfg_scale": args.cfg_text,
                 "image_cfg_scale": args.cfg_image,
-                "input_image": input_image
             }
+            
+            if not args.disable_hf_guidance:
+                extra_args["input_image"] = input_image
 
             torch.manual_seed(seed)
+            print(input_image.shape)
             _, skip_connect_hs = model.first_stage_model.encoder(input_image)
-            z = torch.randn_like(cond["c_concat"][0], device='cuda:0', requires_grad=True) * sigmas[0]
+            z = torch.randn_like(cond["c_concat"][0]) * sigmas[0]
             z = K.sampling.sample_euler_ancestral(model_wrap_cfg, z, sigmas, extra_args=extra_args)
             x = model.decode_first_stage(z, skip_connect_hs=skip_connect_hs)
             x = torch.clamp((x + 1.0) / 2.0, min=0.0, max=1.0)
             x = 255.0 * rearrange(x, "1 c h w -> h w c")
             edited_image = Image.fromarray(x.type(torch.uint8).cpu().numpy())
 
-            print(f"Save images to {image_path.split('.')[0] +'.jpg'}")
+            print(f"Save images to {image_path.split('.')[0]+'.jpg'}")
             edited_image.save(os.path.join(args.outdir, image_path))
             # input_image_pil.save(os.path.join(args.outdir, f"{image_path.split('.')[0]}_input.jpg"))
+
 if __name__ == "__main__":
     main()

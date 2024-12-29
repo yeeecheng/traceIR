@@ -1,11 +1,26 @@
 {
-    "000001.png": ["Cleanse the photo of its motion blur.",
-        "The image depicts a street scene where we can observe various signs of environmental degradation. The most noticeable is the litter scattered around, with trash visible on the sidewalk and possibly in the road. This indicates improper waste disposal practices and lack of effective cleanup efforts. Additionally, the presence of vehicles parked closely together suggests that urban congestion may contribute to pollution in this area. The condition of the street itself appears clean, but it's hard to gauge from a single snapshot whether there are any long-term environmental issues at play, such as soil erosion or water quality problems. Overall, the scene points towards a need for better waste management, public awareness about littering, and potentially urban planning measures to address congestion."
+    "./deblur292.png": [
+        "clean the motion blur.",
+        "The drawback of the image is that there is a large white patch on the right side, which obscures part of the scene and makes it unclear. This degradation type can be identified as an artifact or digital glitch, likely caused by a technical issue during capture, transmission, or processing."
     ],
-    "179.png": ["Enhance overall lighting of the image.",
-        "The image depicts a collection of colorful kites with vibrant patterns and tassels. The degradation type in this picture is likely physical wear or damage, which could be the result of exposure to weather elements like wind, rain, or sun over time. This may cause fading, fraying, tears, or loosening of materials, impacting their overall appearance and quality. These kites may have been stored improperly, flown under harsh conditions, or simply aged naturally, leading to the observed signs of wear."
+    "./desnow66.jpg": [
+        "please desnow this degraded image.",
+        "The image is plagued by multiple distortions. It appears to have a \"checkerboard\" pattern, which may be indicative of an error in the image's compression or decompression process. Additionally, there are diagonal streaks of distortion across the photo, suggesting that some form of digital corruption has occurred during its creation or handling. These issues negatively impact the quality and clarity of the image."
     ],
-    "kitty-1995.png": ["Remove snow from the image.",
-        "The image appears to be degraded by a combination of issues that affect the clarity and quality. Firstly, there is a noticeable blurring effect across most of the scene, making it difficult to discern fine details or sharp edges. This could be due to camera shake during the capture, focus problems, or an issue with the lens. Secondly, there seems to be a horizontal banding artifact that runs through the center of the image. This may be caused by digital noise reduction applied in post-processing which can lead to smearing and loss of detail. Additionally, there's a slight color desaturation, particularly evident in the skin tones and foliage, giving the picture an unnatural or washed-out appearance. Lastly, there is some graininess, especially noticeable in areas with less contrast, which might be due to high ISO settings when taking the photo. Overall, the degradation types visible in this image include motion blur, banding artifacts, desaturation, and noise/graininess."
+    "./desnow10.jpg": [
+        "please desnow this degraded image.",
+        "The image shows a significant amount of visual noise, which affects the clarity and detail visibility. This degradation type is commonly referred to as \"snow\" or digital noise, especially in low-light conditions or when there are rapid changes in contrast within an image. It can detract from the overall quality and make it difficult to discern fine details or textures."
+    ],
+    "./deblur102.png": [
+        "please deblur this unknown image",
+        "The image is blurry, making it difficult to discern details. The degradation type in this picture appears to be motion blur or camera shake, which results in a lack of sharpness and focus throughout the scene."
+    ],
+    "./lowlight0.jpg": [
+        "enhencement this image to the normal-light.",
+        "The image is blurry, making it difficult to discern fine details. The degradation type in this picture appears to be due to motion blur or camera shake, which results in a loss of sharpness and clarity."
+    ],
+    "./lowlight10.jpg": [
+        "enhencement this image to the normal-light.",
+        "The image appears to have a significant loss of detail and color, with the photo looking washed out and muted. This degradation type can be described as having a lack of contrast, poor dynamic range, and an overall flat appearance that detracts from the clarity and visual interest of the scene."
     ]
 }

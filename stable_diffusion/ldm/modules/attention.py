@@ -9,7 +9,7 @@ from torch import nn, einsum
 from einops import rearrange, repeat
 
 from ldm.modules.diffusionmodules.util import checkpoint
-
+iter_att = 0
 
 def exists(val):
     return val is not None
@@ -177,7 +177,7 @@ class CrossAttention(nn.Module):
 
         self.prompt_to_prompt = False
 
-    def forward(self, x, context=None, mask=None):
+    def forward(self, x, context=None, mask=None, flag=None):
         is_self_attn = context is None
 
         h = self.heads
@@ -207,12 +207,60 @@ class CrossAttention(nn.Module):
         # attention, what we cannot get enough of
         # attn = sim.softmax(dim=-1)
         attn = torch.softmax(sim.float(), dim=-1).type(sim.dtype)
-
+       
+        if flag == "4" and attn.shape[1] == 2560 and is_self_attn == False:
+            self.visual_att(attn)
         out = einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
         return self.to_out(out)
 
+    def visual_att(self, att):
+        global iter_att
+        from PIL import Image
+        import numpy as np
+        import os
+        import matplotlib.pyplot as plt
+        os.makedirs("attention_maps", exist_ok=True)
 
+        input_image = Image.open("./examples/validation/deblur292.png").convert("RGB")
+        input_image = self.resize_image_to_resolution(input_image)
+        input_image = np.array(input_image)
+        h, w = input_image.shape[:2]
+        for i in [2, 3, 4]:
+            avg_attention = torch.sum(att[:,:,i], axis=0)
+            avg_attention = avg_attention.reshape(40, 64)
+            upsampled_attention = F.interpolate(
+                avg_attention.unsqueeze(0).unsqueeze(0),
+                size=input_image.shape[:2],
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(0).squeeze(0)
+
+            upsampled_attention = (upsampled_attention - upsampled_attention.min()) / (
+                upsampled_attention.max() - upsampled_attention.min()
+            )
+
+            cmap = plt.colormaps["jet"]
+            heatmap = cmap(upsampled_attention.cpu().numpy())[:, :, :3]
+            heatmap = (heatmap * 255).astype(np.uint8)
+
+            # 疊加熱力圖
+            alpha = 0.4
+            overlay = (1 - alpha) * input_image + alpha * heatmap
+            overlay = overlay.astype(np.uint8)
+            plt.imsave(os.path.join("attention_maps", f"{iter_att}_{i}_heatmap.png"), overlay)
+         
+        iter_att += 1
+    
+    def resize_image_to_resolution(self, input_image, resolution= 320, reverse=True):
+        from PIL import Image, ImageOps
+        width, height = input_image.size
+        scale = resolution / min(width, height) if reverse else resolution / max(width, height)
+        new_width = int(width * scale)
+        new_height = int(height * scale)
+        new_width = (new_width // 64) * 64
+        new_height = (new_height // 64) * 64
+        return ImageOps.fit(input_image, (new_width, new_height), method=Image.Resampling.LANCZOS)
 
 class BasicTransformerBlock(nn.Module):
     ATTENTION_MODES = {
@@ -248,14 +296,14 @@ class BasicTransformerBlock(nn.Module):
         x = x.type(self.norm1.weight.dtype)
         if context is not None:
             context = context.type(self.norm1.weight.dtype)
-        x = self.attn1(self.norm1(x)) + x
+        x = self.attn1(self.norm1(x), flag= "1") + x
         if self.disable_dual_context:
-            x = self.attn2(self.norm2(x), context=context) + x
+            x = self.attn2(self.norm2(x), context=context, flag= "2") + x
         else:
             inst_context = context[0::2]
             flaw_context = context[1::2]
-            x = self.attn2(self.norm2(x), context=inst_context) + x
-            x = self.attn_extra(self.norm_extra(x), context=flaw_context) + x
+            x = self.attn2(self.norm2(x), context=inst_context, flag= "2") + x
+            x = self.attn_extra(self.norm_extra(x), context=flaw_context, flag= "3") + x
         x = self.ff(self.norm3(x)) + x
         return x
 

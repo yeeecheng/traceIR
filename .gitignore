@@ -2,3 +2,7 @@ checkpoints/
 src/clip
 src/taming-transformers
 validation_results/
+attentionmap/
+dataset/
+results/
+resize/

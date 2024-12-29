@@ -7,4 +7,4 @@ wget -P $SCRIPT_DIR/../checkpoints/ -N https://huggingface.co/yeates/PromptFix/r
 
 echo "Pre-trained model downloaded to checkpoints/promptfix.ckpt"
 echo "Begin inference..."
-CUDA_VISIBLE_DEVICES='6, 7' python $SCRIPT_DIR/../inference.py
+CUDA_VISIBLE_DEVICES='0' python $SCRIPT_DIR/../promptfix_inference.py
